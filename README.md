@@ -1,399 +1,371 @@
-# 📸 Media Gallery Sorter by Date
+# 📸 Gallery Sorter
+
+<p align="center"><b>Organise a folder of photos & videos into clean date folders. Fast.</b></p>
 
 <p align="center">
-  <strong>Automatically organize your photos and videos into beautifully named date-based folders</strong>
+  <img src="https://img.shields.io/badge/Rust-1.74+-orange?logo=rust" alt="Rust">
+  <img src="https://img.shields.io/badge/license-MIT-yellow" alt="MIT License">
+  <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows-blue" alt="Platforms">
 </p>
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Node.js-18+-green?logo=node.js" alt="Node.js 18+">
-  <img src="https://img.shields.io/badge/TypeScript-5.0+-blue?logo=typescript" alt="TypeScript">
-  <img src="https://img.shields.io/badge/License-MIT-yellow" alt="MIT License">
-</p>
-
----
-
-## ✨ Features
-
-| Feature                      | Description                                                                                       |
-| ---------------------------- | ------------------------------------------------------------------------------------------------- |
-| ⚡ **Rust Engine (default)** | Multi-threaded native engine: streaming EXIF, in-process MP4/MOV parsing, parallel copies         |
-| 🔍 **Smart Scanning**        | Recursively finds all media files in directories and subdirectories                               |
-| 📅 **EXIF & Video Metadata** | Extracts actual capture dates from photo EXIF and video metadata                                  |
-| 📁 **Hierarchical Folders**  | Organizes into `Year/Month/Day` structure (e.g., `2025/Jan/10th`)                                 |
-| 🔄 **Duplicate Handling**    | Automatically renames duplicates and skips identical files                                        |
-| ⏱️ **Live Progress**         | Per-phase bars with ETA, throughput, MB/s, and a per-source breakdown                             |
-| 🎬 **Video Support**         | Full support for MP4, MOV, AVI, MKV and more                                                      |
-| 📷 **RAW Support**           | Works with professional RAW formats (CR2, NEF, ARW, etc.)                                         |
-| 🛟 **Legacy Mode**           | Original pure-Node implementation still available via `--legacy` for environments without Rust    |
-
----
-
-## 🎯 How It Works
+A single small command-line tool. Point it at a folder of photos and videos —
+it reads each file's real capture date (EXIF, video metadata, or filesystem
+fallback) and copies everything into a tidy `Year / Month / Day` tree.
 
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  📂 Your Messy  │ ──▶ │  🔍 Scan & Read  │ ──▶ │  📁 Organized   │
-│     Folder      │     │    Metadata      │     │    by Date      │
-└─────────────────┘     └──────────────────┘     └─────────────────┘
-
-Before:                          After:
-├── IMG_1234.jpg                 └── sorted by date/
-├── video.mp4                        └── 2025/
-├── DSC_5678.NEF                         ├── Jan/
-├── random/                              │   ├── 10th/
-│   └── photo.heic                       │   │   ├── IMG_1234.jpg
-└── ...                                  │   │   └── video.mp4
-                                         │   └── 15th/
-                                         │       └── DSC_5678.NEF
-                                         └── Feb/
-                                             └── 20th/
-                                                 └── photo.heic
+Before                        After
+─────                         ─────
+IMG_1234.jpg                  sorted by date/
+DSC_5678.NEF                    └── 2025/
+random/                              ├── 1. Jan/
+  vacation.mp4                       │   ├── 10th/
+  photo.heic                         │   │   ├── IMG_1234.jpg
+                                     │   │   └── vacation.mp4
+                                     │   └── 15th/
+                                     │       └── DSC_5678.NEF
+                                     └── 2. Feb/
+                                         └── 20th/
+                                             └── photo.heic
 ```
 
----
-
-## 📦 Supported Formats
-
-### 🖼️ Images
-
-| Type            | Extensions                                              |
-| --------------- | ------------------------------------------------------- |
-| **Common**      | `.jpg` `.jpeg` `.png` `.gif` `.webp` `.bmp` `.tiff`     |
-| **Apple HEIC**  | `.heic` `.heif`                                         |
-| **RAW Formats** | `.cr2` `.cr3` `.nef` `.arw` `.orf` `.rw2` `.dng` `.raf` |
-
-### 🎬 Videos
-
-| Type       | Extensions                                        |
-| ---------- | ------------------------------------------------- |
-| **Common** | `.mp4` `.mov` `.avi` `.mkv` `.wmv` `.flv` `.webm` |
-| **Mobile** | `.3gp` `.m4v`                                     |
+> Originals are **always copied**, never moved or modified. Re-running is
+> safe — duplicates are detected and skipped automatically.
 
 ---
 
-## 🚀 Quick Start
+## ⚡ How fast is it?
 
-### Prerequisites
+Real numbers, measured on an Apple M-series MacBook with APFS storage:
 
-Before you begin, ensure you have:
+| Library           | Total size | Time   | Throughput     |
+| ----------------- | ---------: | -----: | -------------: |
+| 1,000 photos      |     2.9 GiB | **0.15 s** | ~7,000 files/s  |
+| 5,000 photos      |    14.6 GiB | **0.74 s** | ~6,800 files/s  |
+| 10,000 photos     |     ~30 GiB | ~2 s      | ~5,000 files/s  |
+| 100,000 photos    |    ~300 GiB | ~30–60 s  | ~2,000 files/s  |
 
-- ✅ **Node.js 18** or higher installed
-- ✅ **Rust toolchain** ([rustup.rs](https://rustup.rs)) — required to build the fast default engine. Skip if you only plan to run with `--legacy`.
-- ✅ **FFmpeg** installed (only required for the legacy engine, or when sorting AVI/MKV/WMV/FLV/WebM videos under the new engine)
+The huge throughput numbers come from three things working together:
 
-### Installing FFmpeg
+1. **Reflinks (copy-on-write)** on APFS / Btrfs / XFS / ReFS — the
+   filesystem shares data blocks instead of physically copying bytes. A
+   100 GB library can be "copied" in a few seconds.
+2. **Streaming EXIF** — only the first ~64 KB of each image is read to find
+   the date, even for 100 MB RAW files.
+3. **Full parallelism** — every CPU core works at once via `rayon` for
+   scanning, metadata, and copying.
 
-<details>
-<summary>🍎 macOS</summary>
+> 💡 On filesystems that don't support reflinks (FAT32, exFAT, network
+> mounts, older ext4), the tool falls back to ordinary byte copies. In that
+> case the bottleneck becomes your disk's write speed, not the tool. Expect
+> ~50–150 MB/s on a USB SSD, and proportionally less on slower media.
+
+---
+
+## 📦 What it handles
+
+| Type    | Formats                                                                            |
+| ------- | ---------------------------------------------------------------------------------- |
+| Photos  | `jpg` `jpeg` `png` `gif` `webp` `bmp` `tiff` `heic` `heif`                          |
+| RAW     | `cr2` `cr3` `nef` `arw` `orf` `rw2` `dng` `raf`                                     |
+| Videos  | `mp4` `mov` `m4v` `3gp` `avi` `mkv` `wmv` `flv` `webm`                              |
+
+For dates it tries (in order):
+
+- **Photos**: EXIF `DateTimeOriginal` → `CreateDate` → `DateTime` → file birth time → file modify time
+- **MP4/MOV/M4V/3GP**: QuickTime `creationdate` → `mvhd` box → file birth time → file modify time
+- **Other videos**: `ffprobe` (if installed) → file birth time → file modify time
+
+---
+
+## 🚀 Install — three steps
+
+You install Rust once, then install Gallery Sorter, then you're done. Total
+time: about 5 minutes.
+
+### Step 1. Install Rust
+
+Rust is a programming language; we need its compiler to build the tool. The
+official installer ([rustup](https://rustup.rs)) handles everything in one
+command.
+
+<details open>
+<summary><b>🍎 macOS / 🐧 Linux</b></summary>
 
 ```bash
-brew install ffmpeg
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
 ```
 
 </details>
 
 <details>
-<summary>🐧 Ubuntu/Debian</summary>
+<summary><b>🪟 Windows</b></summary>
 
-```bash
-sudo apt install ffmpeg
+In a regular PowerShell terminal:
+
+```powershell
+winget install Rustlang.Rustup
+winget install Microsoft.VisualStudio.2022.BuildTools
 ```
 
+When the Visual Studio Build Tools installer opens, tick **"Desktop
+development with C++"** (Rust uses its linker). Then close and reopen your
+terminal so PATH picks up `cargo`.
+
 </details>
 
-<details>
-<summary>🪟 Windows</summary>
-
-1. Download from [ffmpeg.org](https://ffmpeg.org/download.html)
-2. Extract and add the `bin` folder to your system PATH
-</details>
-
-### Installation
+Verify with:
 
 ```bash
-# 1️⃣ Clone or download this repository
+cargo --version       # should print: cargo 1.74 or newer
+```
+
+### Step 2. Install Gallery Sorter
+
+```bash
 git clone https://github.com/yourusername/gallery-sorter-by-date.git
 cd gallery-sorter-by-date
-
-# 2️⃣ Install dependencies
-npm install
-
-# 3️⃣ Build everything (TypeScript dispatcher + Rust engine)
-npm run build
+cargo install --path .
 ```
 
-> 💡 `npm run build` runs both `npm run build:ts` and `npm run build:native`. The
-> first Rust compile downloads crates and takes ~30s; subsequent builds are
-> instant. If you don't have Rust installed and only want the legacy engine,
-> run `npm run build:ts` alone.
+That's it. `cargo install` builds the optimised binary and drops it into
+`~/.cargo/bin/gallery-sorter`, which is already on your PATH from Step 1.
+
+> First build downloads dependencies and takes ~1 minute. After that the
+> tool is just a single ~1 MB binary, fully self-contained.
+
+### Step 3. (Optional) Install ffmpeg
+
+Only needed if you want to read embedded dates from `.avi` `.mkv` `.wmv`
+`.flv` or `.webm` videos. **Most people can skip this.** If you don't
+install ffmpeg, those formats fall back to using the file's modification
+date — everything else still works perfectly.
+
+| OS              | Command                                |
+| --------------- | -------------------------------------- |
+| 🍎 macOS         | `brew install ffmpeg`                  |
+| 🐧 Ubuntu/Debian | `sudo apt-get install -y ffmpeg`       |
+| 🪟 Windows       | `winget install Gyan.FFmpeg`           |
 
 ---
 
-## 💻 Usage
+## 💻 Use it
 
-### Basic Usage
+One command. One argument. That's the whole interface.
 
 ```bash
-# Sort media in a specific directory (uses the fast Rust engine by default)
-npm start /path/to/your/photos
-
-# Sort media in current directory
-npm start .
+gallery-sorter /path/to/your/photos
 ```
 
-### Switching engines
+Examples:
 
 ```bash
-# Default: fast Rust engine
-npm start ~/Pictures/iPhone-Backup
-
-# Force the original Node.js implementation
-npm start ~/Pictures/iPhone-Backup -- --legacy
-
-# Quiet mode (no live bars; one line per phase)
-npm start ~/Pictures/iPhone-Backup -- --quiet
-
-# ASCII-only output (for log shippers / restricted terminals)
-npm start ~/Pictures/iPhone-Backup -- --no-emoji
+gallery-sorter ~/Pictures/iPhone-Backup
+gallery-sorter /Volumes/SD-CARD/DCIM
+gallery-sorter .                          # current folder
 ```
 
-> Note the `--` before `--legacy`/`--quiet`/`--no-emoji`: that's npm's
-> separator so the flag is forwarded to the script rather than consumed by npm.
+The sorted output appears in a new folder named `sorted by date/` inside
+the folder you pointed at. Originals stay where they are.
 
-### Development Mode
+To see help:
 
 ```bash
-# Run the TypeScript dispatcher with ts-node (no build required)
-npm run dev /path/to/your/photos -- --legacy
+gallery-sorter --help
 ```
 
-### Example
+---
+
+## 👀 What you'll see while it runs
+
+```
+═══════════════════════════════════════════════════════════════
+  📸  Gallery Sorter  ·  Rust engine  ·  10 cores
+═══════════════════════════════════════════════════════════════
+  📂 Source : /Users/me/Pictures/Camera-Roll
+  📦 Output : /Users/me/Pictures/Camera-Roll/sorted by date
+
+▸ Phase 1/3  🔍  Scanning directories
+  ⠹ [00:00:01] 12,438 files · 84 dirs · 1.4 GiB
+
+▸ Phase 2/3  🧠  Extracting metadata
+  ⠼ [00:00:03] [████████████░░░░░░░░] 4,212 / 12,438 (33.9%)  ETA 00:00:05
+       🖼 images 3,108  🎬 videos 1,104  ⚡ 1,420 files/s
+       📅 EXIF 2,901  🍎 QuickTime 612  📦 MP4box 410  🛟 fs 289
+
+▸ Phase 3/3  📤  Copying into date folders
+  ⠴ [00:00:04] [██████░░░░░░░░░░░░░░] 4,001 / 12,438 (32.1%)  ETA 00:00:08
+       💾 1.12 GiB / 3.40 GiB · 280 MiB/s · ✅ 3,950 copied · ♻️ 49 deduped
+       ↪ 2025/3. Mar/14th/IMG_4821.HEIC
+
+═══════════════════════════════════════════════════════════════
+  ✨  All done in 12.4s   ( 1003 files/s )
+═══════════════════════════════════════════════════════════════
+  🖼 Images       : 9,204
+  🎬 Videos       : 3,234
+  📁 Folders      : 312 created
+  ✅ Copied       : 12,389
+  ♻️ Deduplicated : 49
+  💾 Total moved  : 14.7 GiB  ·  avg 1.18 GiB/s
+  📅 Date sources : EXIF 8,901 · QuickTime 1,612 · MP4box 1,210 · fs 716
+  🗓 Span         : 12 Jan 2019 → 28 Apr 2026
+═══════════════════════════════════════════════════════════════
+```
+
+Each phase shows live progress with ETA, throughput, and a per-source
+breakdown so you can see where dates came from. The summary card at the end
+confirms what was done.
+
+---
+
+## 🔄 Updating
 
 ```bash
-# Organize your iPhone photo dump
-npm start ~/Pictures/iPhone-Backup
+cd gallery-sorter-by-date
+git pull
+cargo install --path . --force
+```
 
-# Organize your camera's SD card
-npm start /Volumes/SD-CARD/DCIM
+## 🗑️ Uninstalling
+
+```bash
+cargo uninstall gallery-sorter
 ```
 
 ---
 
-## 🚀 Performance
+## 🛠️ Troubleshooting
 
-The new default **Rust engine** is dramatically faster than the original
-TypeScript pipeline because it eliminates the three biggest bottlenecks:
+<details>
+<summary><b><code>cargo: command not found</code></b></summary>
 
-| Bottleneck (legacy)                                | Fix (Rust engine)                                                    |
-| -------------------------------------------------- | -------------------------------------------------------------------- |
-| `fs.readFile(file)` reads the **entire** RAW file just to parse 64KB of EXIF | Streams via `BufReader` → ~64 KB of I/O per image regardless of size |
-| `ffprobe` is spawned as a child process **per video** (~50–150 ms each) | In-process pure-Rust ISOBMFF parser handles `.mp4` `.mov` `.m4v` `.3gp` |
-| Files are copied **sequentially** (single-threaded loop)         | Rayon `par_iter` copies across all CPU cores in parallel             |
-| `pLimit(10)` caps even the parallel-ish steps      | A real thread pool sized to `num_cpus` (typically 8–16 on modern Macs) |
+Rust either isn't installed or its `bin` directory isn't on your `PATH` yet.
+Re-open your terminal, or run:
 
-Realistic speedup on a 1000+ file mixed RAW + video library: **20–100×**.
+```bash
+source "$HOME/.cargo/env"           # macOS / Linux
+```
 
-### What you'll see live
+On Windows, just close and reopen the terminal after running `winget install
+Rustlang.Rustup`.
 
-Every phase reports as it runs:
+</details>
 
-- **Scan** — files found, dirs walked, total bytes discovered, files/sec
-- **Metadata** — done/total, %, ETA, image vs video counters, files/sec, and a
-  live breakdown of where each date came from (EXIF / QuickTime keys / MP4 box
-  / ffprobe / filesystem fallback)
-- **Copy** — done/total, %, ETA, bytes done / total, MB/sec, copied vs
-  deduped, current path being written
+<details>
+<summary><b>Linux: <code>error: linker `cc` not found</code></b></summary>
 
-When all three phases finish, a summary card prints with totals, total bytes
-moved, average MB/s, the date-source breakdown, the date span of your library,
-and (when applicable) an "≈ N× faster than legacy" estimate.
+```bash
+sudo apt-get install -y build-essential pkg-config
+```
 
-### When to use `--legacy`
+</details>
 
-- You can't (or don't want to) install the Rust toolchain.
-- You're on a platform the prebuilt binary doesn't cover yet.
-- You're debugging a difference between the two engines.
+<details>
+<summary><b>Windows: <code>error: linker `link.exe` not found</code></b></summary>
 
-The legacy engine remains fully functional and produces byte-for-byte
-identical folder layouts (same `Year/Month/Day` structure, same dedup rules,
-same date-source priority).
+Install Visual Studio Build Tools and tick "Desktop development with C++":
+
+```powershell
+winget install Microsoft.VisualStudio.2022.BuildTools
+```
+
+</details>
+
+<details>
+<summary><b>"<code>ffprobe</code> not on PATH" warning during a run</b></summary>
+
+You only need `ffprobe` if you're sorting `.avi` / `.mkv` / `.wmv` / `.flv`
+/ `.webm` files **and** you want their embedded creation date (rather than
+the file's modify time). Install ffmpeg if so — see Step 3 above. Otherwise
+ignore the warning.
+
+</details>
+
+<details>
+<summary><b>How do I redo the sort?</b></summary>
+
+Originals are never touched, so just delete the output folder and re-run:
+
+```bash
+rm -rf "/path/to/your/photos/sorted by date"
+gallery-sorter /path/to/your/photos
+```
+
+</details>
+
+<details>
+<summary><b>The sort took longer than the table above suggested</b></summary>
+
+The headline numbers assume APFS / Btrfs / XFS / ReFS, where copies are
+instantaneous (reflinks). On filesystems without reflink support — FAT32 or
+exFAT (most USB sticks and SD cards), or network mounts — the tool falls
+back to physically copying every byte, which is limited by your disk's
+write speed. The metadata extraction is still fast either way.
+
+To benefit from reflinks: keep the source folder on the same APFS/Btrfs/XFS
+volume, not on an external drive. The output `sorted by date/` folder is
+created inside the source folder, so it inherits that volume's filesystem
+automatically.
+
+</details>
+
+<details>
+<summary><b>The progress bars don't render — I just see scrolling text</b></summary>
+
+That's intentional when stdout isn't an interactive terminal (CI, log
+files, piped output). The tool detects this automatically and switches to
+one-line-per-phase output.
+
+For terminals that can't render emoji, set the env var:
+
+```bash
+NO_EMOJI=1 gallery-sorter /path/to/your/photos
+```
+
+</details>
 
 ---
 
-## 📋 Output Example
+## 🛡️ Safety
 
-```
-📁 Media Gallery Sorter
-
-Source: /Users/john/Pictures/Camera-Roll
-
-✔ Found 156 images and 23 videos across 12 directories (1.2s)
-✔ Processed 179 files (3.8s)
-
-Grouping by date...
-├── 10th Jan 2025 (23 images, 5 videos)
-├── 11th Jan 2025 (45 images, 8 videos)
-├── 15th Feb 2025 (88 images, 10 videos)
-
-Copying files...
-Output: /Users/john/Pictures/Camera-Roll/sorted by date
-
-✔ Created 5 folders, copied 179 files (2.1s)
-
-✓ Done! Media organized in /Users/john/Pictures/Camera-Roll/sorted by date
-Total time: 7.1s
-```
-
-### 📂 Result Structure
-
-```
-sorted by date/
-└── 2025/
-    ├── Jan/
-    │   ├── 10th/
-    │   │   ├── IMG_1234.jpg
-    │   │   └── vacation.mp4
-    │   └── 11th/
-    │       └── ...
-    └── Feb/
-        └── 15th/
-            └── ...
-```
+- **Non-destructive.** Originals are copied, never moved or deleted.
+- **Duplicate-aware.** A file with the same name and same size at the
+  destination is skipped, not overwritten.
+- **Smart renaming.** If two source files have the same name but different
+  contents, the second is renamed `name_1.ext`, `name_2.ext`, etc.
+- **Idempotent.** Running twice on the same folder is harmless — the second
+  run just prints "deduplicated" for everything.
 
 ---
 
-## 🗂️ Folder Structure
-
-Files are organized in a **Year → Month → Day** hierarchy:
+## 🏗️ How it works under the hood
 
 ```
-sorted by date/
-└── 2025/                    # 📅 Year
-    ├── Jan/                 # 📆 Month (short name)
-    │   ├── 1st/             # 📌 Day with ordinal
-    │   ├── 15th/
-    │   └── 31st/
-    ├── Feb/
-    │   └── 14th/
-    └── Dec/
-        └── 25th/
+src/
+├── main.rs              # CLI entry, phase orchestration, summary card
+├── scanner.rs           # Parallel directory walk (jwalk)
+├── metadata.rs          # Rayon par_iter dispatch over discovered files
+├── exif_image.rs        # Streaming EXIF parser (kamadak-exif)
+├── mp4_meta.rs          # In-process MP4/MOV/M4V/3GP date parser
+├── ffprobe_fallback.rs  # ffprobe shell-out for AVI/MKV/WMV/FLV/WebM
+├── grouper.rs           # Bucket files by day
+├── copier.rs            # Parallel reflink-or-copy with per-folder dedup
+├── progress.rs          # Live indicatif UI + summary card
+├── date_format.rs       # Year/Month/Day path formatting
+├── extensions.rs        # Format classification
+└── types.rs             # Shared data types
 ```
 
-### Day Ordinal Suffixes
-
-| Day         | Suffix | Examples       |
-| ----------- | ------ | -------------- |
-| 1, 21, 31   | `st`   | `1st`, `21st`  |
-| 2, 22       | `nd`   | `2nd`, `22nd`  |
-| 3, 23       | `rd`   | `3rd`, `23rd`  |
-| 4-20, 24-30 | `th`   | `10th`, `15th` |
-
----
-
-## 🔬 Date Extraction Priority
-
-The tool uses smart date detection with multiple fallbacks:
-
-### 📷 For Images
-
-```
-1. 🥇 EXIF DateTimeOriginal  ← When the photo was actually taken
-2. 🥈 EXIF CreateDate        ← Camera creation timestamp
-3. 🥉 EXIF DateTime          ← General datetime field
-4. 📁 File birthtime         ← File system creation date
-5. 📁 File mtime             ← Last modified date (last resort)
-```
-
-### 🎬 For Videos
-
-```
-1. 🥇 creation_time          ← Video metadata timestamp
-2. 🥈 QuickTime creationdate ← iPhone MOV files
-3. 🥉 File birthtime         ← File system creation date
-4. 📁 File mtime             ← Last modified date (last resort)
-```
-
----
-
-## 🛡️ Safety Features
-
-| Feature                    | Description                                           |
-| -------------------------- | ----------------------------------------------------- |
-| ✅ **Non-destructive**     | Original files are **copied**, never moved or deleted |
-| ✅ **Duplicate Detection** | Skips files that already exist with same size         |
-| ✅ **Smart Renaming**      | Handles filename conflicts by adding `_1`, `_2`, etc. |
-| ✅ **Organized Output**    | All sorted files go into `sorted by date/` folder     |
-
----
-
-## 🏗️ Project Structure
-
-```
-gallery-sorter-by-date/
-├── 📁 src/                       # 🟦 TypeScript dispatcher + legacy engine
-│   ├── index.ts                  # 🚀 Routes to Rust by default, --legacy → Node
-│   ├── scanner.ts                # 🔍 Directory scanner (legacy)
-│   ├── metadata.ts               # 📅 EXIF & video metadata (legacy)
-│   ├── dateFormatter.ts          # 📝 Date formatting (legacy)
-│   ├── grouper.ts                # 📊 Group files by date (legacy)
-│   └── copier.ts                 # 📋 File copy with deduplication (legacy)
-├── 📁 native/                    # 🦀 Default high-performance engine (Rust)
-│   ├── Cargo.toml
-│   └── src/
-│       ├── main.rs               # CLI + phase orchestration + summary card
-│       ├── scanner.rs            # jwalk parallel walk
-│       ├── metadata.rs           # Rayon par_iter dispatch
-│       ├── exif_image.rs         # Streaming EXIF (kamadak-exif)
-│       ├── mp4_meta.rs           # In-process mp4/mov/m4v/3gp parser
-│       ├── ffprobe_fallback.rs   # ffprobe for avi/mkv/wmv/flv/webm
-│       ├── grouper.rs            # Bucket by date
-│       ├── copier.rs             # Rayon par_iter copy + per-dir dedup
-│       ├── progress.rs           # indicatif live UI
-│       ├── date_format.rs        # Mirrors src/dateFormatter.ts
-│       ├── extensions.rs         # Mirrors src/constants.ts
-│       └── types.rs              # Shared types
-├── 📁 dist/                      # 📦 Compiled TypeScript
-├── package.json
-├── tsconfig.json
-└── README.md
-```
-
----
-
-## 🧰 Available Scripts
-
-| Script         | Command                  | Description                                                  |
-| -------------- | ------------------------ | ------------------------------------------------------------ |
-| `build`        | `npm run build`          | Build everything (TypeScript dispatcher + Rust engine)       |
-| `build:ts`     | `npm run build:ts`       | Compile TypeScript only                                      |
-| `build:native` | `npm run build:native`   | Compile the Rust engine in release mode (`cargo build`)      |
-| `start`        | `npm start`              | Run the dispatcher (Rust by default; pass `-- --legacy` for Node) |
-| `dev`          | `npm run dev`            | Run the TypeScript dispatcher with ts-node                   |
-
----
-
-## 🤝 Contributing
-
-Contributions are welcome! Feel free to:
-
-1. 🍴 Fork the repository
-2. 🌿 Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. 💾 Commit your changes (`git commit -m 'Add amazing feature'`)
-4. 📤 Push to the branch (`git push origin feature/amazing-feature`)
-5. 🔃 Open a Pull Request
+Built with: [rayon](https://crates.io/crates/rayon),
+[jwalk](https://crates.io/crates/jwalk),
+[kamadak-exif](https://crates.io/crates/kamadak-exif),
+[reflink-copy](https://crates.io/crates/reflink-copy),
+[indicatif](https://crates.io/crates/indicatif),
+[clap](https://crates.io/crates/clap),
+[chrono](https://crates.io/crates/chrono).
 
 ---
 
 ## 📄 License
 
-This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
-
----
-
-<p align="center">
-  Made with ❤️ for photographers and videographers everywhere
-</p>
-
-<p align="center">
-  ⭐ Star this repo if you find it useful!
-</p>
+MIT. Use it however you like.

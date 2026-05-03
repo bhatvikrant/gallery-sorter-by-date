@@ -154,7 +154,14 @@ fn copy_one(
     };
 
     let final_dest = dest_dir.join(&final_name);
-    let bytes = std::fs::copy(src, &final_dest)?;
+    // Try reflink first (instant on APFS / Btrfs / XFS / ReFS — the actual
+    // bytes aren't moved, the filesystem just shares the data blocks
+    // copy-on-write). If unsupported, falls back to a regular byte copy.
+    // This is the single biggest perf win on macOS in particular.
+    let bytes = match reflink_copy::reflink_or_copy(src, &final_dest)? {
+        Some(n) => n,            // reflink not supported, regular copy ran
+        None => meta.file.size,  // reflink succeeded; we report logical size
+    };
 
     progress.on_copy(CopyEvent {
         final_name: &final_name,

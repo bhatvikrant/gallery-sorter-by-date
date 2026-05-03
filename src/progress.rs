@@ -1,9 +1,10 @@
 //! Rich terminal progress UI built on `indicatif` + `console`.
 //!
-//! Provides three live phase bars (scan / metadata / copy) with ETA, percent,
-//! throughput, and per-source counters, plus an emoji-rich summary card at the
-//! end. Non-TTY and `--quiet`/`--no-emoji` modes degrade gracefully to plain
-//! line-based output.
+//! Renders three live phase bars (scan / metadata / copy) with ETA, percent,
+//! throughput, and per-source counters, plus an emoji-rich summary card at
+//! the end. Automatically switches to one-line-per-phase output when stdout
+//! isn't a TTY (e.g. piped to a log file). Honours the `NO_COLOR` env var
+//! through `console`.
 
 use crate::copier::{CopyEvent, CopyProgress};
 use crate::metadata::MetadataProgress;
@@ -19,28 +20,29 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy)]
 pub struct UiOptions {
     pub quiet: bool,
-    pub no_emoji: bool,
 }
 
 impl UiOptions {
-    pub fn resolve(quiet_flag: bool, no_emoji_flag: bool) -> Self {
+    /// Auto-detects: live bars when stdout is a TTY, one-line-per-phase
+    /// otherwise (CI, piped output, log files). Respects `NO_EMOJI=1` for
+    /// terminals that mangle UTF-8.
+    pub fn auto() -> Self {
         let attended = Term::stdout().features().is_attended();
-        Self {
-            quiet: quiet_flag || !attended,
-            no_emoji: no_emoji_flag,
-        }
+        Self { quiet: !attended }
     }
 }
 
-/// Tiny helper that swaps emoji for ASCII when `--no-emoji` is set.
+/// Picks emoji vs ASCII based on the `NO_EMOJI` environment variable.
 #[derive(Debug, Clone, Copy)]
 pub struct Glyphs {
     no_emoji: bool,
 }
 
 impl Glyphs {
-    pub fn new(no_emoji: bool) -> Self {
-        Self { no_emoji }
+    pub fn new() -> Self {
+        Self {
+            no_emoji: std::env::var_os("NO_EMOJI").is_some(),
+        }
     }
     pub fn pick(&self, emoji: &'static str, ascii: &'static str) -> &'static str {
         if self.no_emoji {
@@ -48,6 +50,12 @@ impl Glyphs {
         } else {
             emoji
         }
+    }
+}
+
+impl Default for Glyphs {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -69,7 +77,7 @@ impl Ui {
         };
         Self {
             opts,
-            glyphs: Glyphs::new(opts.no_emoji),
+            glyphs: Glyphs::new(),
             multi,
         }
     }

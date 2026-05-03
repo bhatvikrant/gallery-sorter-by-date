@@ -28,29 +28,31 @@ use crate::types::DateGroup;
 
 const OUTPUT_FOLDER_NAME: &str = "sorted by date";
 
-/// Legacy engine throughput baseline used purely for the "≈ Nx faster" line in
-/// the summary card. ~50 files/s is conservative for the legacy pipeline on a
-/// mixed RAW + video library.
-const LEGACY_BASELINE_FILES_PER_SEC: f64 = 50.0;
+/// Friendly long help printed by `gallery-sorter --help`.
+const LONG_ABOUT: &str = "\
+Organises a folder of photos and videos into a clean
+Year / Month / Day directory tree, using each file's real
+capture date (EXIF, video metadata, or filesystem fallback).
+
+Originals are always copied — never moved or modified.
+
+Examples:
+  gallery-sorter ~/Pictures/iPhone-Backup
+  gallery-sorter /Volumes/SD-CARD/DCIM
+  gallery-sorter .
+";
 
 #[derive(Parser, Debug)]
 #[command(
     name = "gallery-sorter",
     version,
-    about = "Fast Rust engine for sorting media into date-based folders"
+    about = "Sort your photos and videos into date folders, fast.",
+    long_about = LONG_ABOUT
 )]
 struct Args {
-    /// Source directory to scan recursively.
-    #[arg(value_name = "DIR")]
+    /// Folder to organise (defaults to the current directory).
+    #[arg(value_name = "FOLDER")]
     source: Option<PathBuf>,
-
-    /// Suppress live progress bars; print one line per phase instead.
-    #[arg(short, long)]
-    quiet: bool,
-
-    /// Disable emoji glyphs in output.
-    #[arg(long)]
-    no_emoji: bool,
 }
 
 fn main() {
@@ -76,7 +78,9 @@ fn run() -> Result<()> {
         .build_global()
         .ok();
 
-    let opts = UiOptions::resolve(args.quiet, args.no_emoji);
+    // Auto-detect non-TTY (piped to a file/log shipper) and switch to
+    // line-based output. Users never have to ask for it.
+    let opts = UiOptions::auto();
     let ui = Ui::new(opts);
     ui.print_banner(&source, &output, cores);
 
@@ -221,25 +225,17 @@ fn print_summary_card(ui: &Ui, s: SummaryInputs<'_>) {
     let bar = "═".repeat(63);
 
     let secs = s.total_elapsed.as_secs_f64().max(0.001);
-    let our_rate = s.total_files as f64 / secs;
-    let speedup = our_rate / LEGACY_BASELINE_FILES_PER_SEC;
+    let files_per_sec = (s.total_files as f64 / secs) as u64;
     let avg_bytes_per_sec = (s.bytes_copied as f64 / secs) as u64;
 
     println!("{}", style(&bar).green());
     println!(
-        "  {}  All done in {}   {}",
+        "  {}  All done in {}   {} {} files/s {}",
         g.pick("✨", "*"),
         style(format_dur(s.total_elapsed)).bold().green(),
-        if speedup >= 1.5 {
-            format!(
-                "{} ≈ {:.0}× faster than legacy {}",
-                style("(").dim(),
-                speedup,
-                style(")").dim()
-            )
-        } else {
-            String::new()
-        }
+        style("(").dim(),
+        style(files_per_sec).bold(),
+        style(")").dim()
     );
     println!("{}", style(&bar).green());
 

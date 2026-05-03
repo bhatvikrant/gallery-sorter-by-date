@@ -1,9 +1,12 @@
 [package]
 name = "gallery-sorter"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "High-performance Rust engine for the gallery-sorter-by-date CLI"
+description = "Blazingly fast CLI to organise photos & videos into date folders"
 license = "MIT"
+readme = "README.md"
+repository = "https://github.com/yourusername/gallery-sorter-by-date"
+categories = ["command-line-utilities", "filesystem", "multimedia"]
 
 [[bin]]
 name = "gallery-sorter"
@@ -23,9 +26,14 @@ number_prefix = "0.4"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Copy-on-write copies on APFS / Btrfs / XFS / ReFS. Falls back to a normal
+# byte copy on filesystems that don't support reflinks. This is the single
+# biggest perf win for the copy phase on supported filesystems.
+reflink-copy = "0.1"
 
 [profile.release]
 opt-level = 3
-lto = "thin"
+lto = "fat"
 codegen-units = 1
 strip = "symbols"
+panic = "abort"

@@ -1,11 +1,5 @@
-node_modules/*
-.env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-dist/*
+/target
+/.cargo-home
 
-# Rust native engine
-native/target/
-native/.cargo-home/
+# OS junk
+.DS_Store
