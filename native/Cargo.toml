@@ -1,0 +1,31 @@
+[package]
+name = "gallery-sorter"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance Rust engine for the gallery-sorter-by-date CLI"
+license = "MIT"
+
+[[bin]]
+name = "gallery-sorter"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+rayon = "1"
+jwalk = "0.8"
+num_cpus = "1"
+kamadak-exif = "0.6"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+indicatif = "0.18"
+console = "0.16"
+humantime = "2"
+number_prefix = "0.4"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
