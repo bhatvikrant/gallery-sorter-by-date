@@ -90,7 +90,11 @@ fn run() -> Result<()> {
     ui.phase_header(1, 3, "Scanning directories", "🔍");
     let scan_bar = ui.make_scan_bar();
     let scan_start = Instant::now();
-    let scan = scan_directory(&source, scan_bar.clone() as Arc<dyn scanner::ScanProgress>)?;
+    let scan = scan_directory(
+        &source,
+        Some(output.as_path()),
+        scan_bar.clone() as Arc<dyn scanner::ScanProgress>,
+    )?;
     let scan_elapsed = scan_start.elapsed();
     scan_bar.finish(
         scan.image_count,

@@ -50,6 +50,14 @@ pub struct NoopProgress;
 impl CopyProgress for NoopProgress {}
 
 struct DirState {
+    /// Names that were already on disk *before* this run started. Only these
+    /// are valid dedup targets — a name we created during this run must
+    /// **not** be treated as a "duplicate" just because a different source
+    /// file happens to share its name and size (that previously caused
+    /// collisions to silently disappear).
+    pre_existing: HashSet<String>,
+    /// Every name reserved in this destination directory, including ones we
+    /// added during this run. Used by `pick_unique` to avoid stomping.
     taken: HashSet<String>,
 }
 
@@ -177,8 +185,9 @@ pub fn copy_groups(
 }
 
 fn seed_dir_state(dir: &Path) -> Arc<Mutex<DirState>> {
-    // Seed taken-name set with whatever's already on disk so duplicate
-    // filenames from prior runs are honoured.
+    // Seed both name sets with whatever's already on disk so:
+    //   * duplicate filenames from prior runs are honoured (idempotent),
+    //   * `pick_unique` doesn't try to use names that already exist.
     let mut taken: HashSet<String> = HashSet::new();
     if let Ok(rd) = std::fs::read_dir(dir) {
         for entry in rd.flatten() {
@@ -187,7 +196,11 @@ fn seed_dir_state(dir: &Path) -> Arc<Mutex<DirState>> {
             }
         }
     }
-    Arc::new(Mutex::new(DirState { taken }))
+    let pre_existing = taken.clone();
+    Arc::new(Mutex::new(DirState {
+        pre_existing,
+        taken,
+    }))
 }
 
 enum Outcome {
@@ -204,10 +217,45 @@ fn copy_one(
     let src = &meta.file.path;
     let original = &meta.file.filename;
 
-    // Same-size dedup against existing file at the same destination name.
-    let direct_dest = dest_dir.join(original);
-    if let Ok(existing) = std::fs::metadata(&direct_dest) {
-        if existing.len() == meta.file.size {
+    // Reserve a destination name *atomically* under the per-directory mutex.
+    // The dedup check has to live in here too — if we did it outside the
+    // lock, two source files with the same filename and (coincidentally)
+    // the same size could race: the first finishes its copy, then the
+    // second's pre-lock dedup check sees that file on disk and silently
+    // drops itself as a "duplicate". That's how the previous version was
+    // losing different files from different source subdirectories.
+    enum Reserved {
+        // Name matches a file that pre-existed this run with the same size —
+        // safe to dedup against (idempotent re-run).
+        Dedup,
+        // Use this freshly-chosen name (renamed if needed).
+        Use(String),
+    }
+    let reserved = {
+        let mut guard = state.lock().expect("dir mutex poisoned");
+
+        // Only treat a destination file as a true duplicate if it was *already
+        // on disk before this run started*. A name we placed there ourselves
+        // earlier in this run is just a filename collision and must be
+        // renamed, not skipped.
+        let pre_existing_match = guard.pre_existing.contains(original) && {
+            let direct_dest = dest_dir.join(original);
+            std::fs::metadata(&direct_dest)
+                .map(|m| m.len() == meta.file.size)
+                .unwrap_or(false)
+        };
+
+        if pre_existing_match {
+            Reserved::Dedup
+        } else {
+            let name = pick_unique(&guard.taken, original);
+            guard.taken.insert(name.clone());
+            Reserved::Use(name)
+        }
+    };
+
+    let final_name = match reserved {
+        Reserved::Dedup => {
             progress.on_copy(CopyEvent {
                 final_name: original,
                 dest_dir,
@@ -216,14 +264,7 @@ fn copy_one(
             });
             return Ok(Outcome::Deduped);
         }
-    }
-
-    // Reserve a unique filename atomically.
-    let final_name = {
-        let mut guard = state.lock().expect("dir mutex poisoned");
-        let name = pick_unique(&guard.taken, original);
-        guard.taken.insert(name.clone());
-        name
+        Reserved::Use(n) => n,
     };
 
     let final_dest = dest_dir.join(&final_name);
@@ -282,6 +323,8 @@ fn ensure_dir(p: &Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{DateSource, MediaFile, MediaType};
+    use chrono::Local;
 
     #[test]
     fn split_extension() {
@@ -299,5 +342,107 @@ mod tests {
         assert_eq!(pick_unique(&taken, "a.jpg"), "a_1.jpg");
         taken.insert("a_1.jpg".into());
         assert_eq!(pick_unique(&taken, "a.jpg"), "a_2.jpg");
+    }
+
+    /// Regression test: two source files in different subdirectories with the
+    /// same filename and the same byte size used to be silently lost as
+    /// "duplicates". They must each end up in the destination instead.
+    #[test]
+    fn same_name_same_size_in_different_subdirs_are_both_copied() {
+        let tmp = tempdir();
+        let src_a = tmp.join("camA");
+        let src_b = tmp.join("camB");
+        std::fs::create_dir_all(&src_a).unwrap();
+        std::fs::create_dir_all(&src_b).unwrap();
+        // Different *contents*, same byte length, same filename.
+        std::fs::write(src_a.join("IMG.jpg"), b"AAAAAAAA").unwrap();
+        std::fs::write(src_b.join("IMG.jpg"), b"BBBBBBBB").unwrap();
+
+        let group = DateGroup {
+            date_key: "2026-05-04".into(),
+            folder_path: PathBuf::from("2026/5. May/4th"),
+            display_name: "4th May 2026".into(),
+            date: Local::now(),
+            files: vec![
+                synthetic_meta(src_a.join("IMG.jpg"), 8),
+                synthetic_meta(src_b.join("IMG.jpg"), 8),
+            ],
+            image_count: 2,
+            video_count: 0,
+        };
+
+        let dest = tmp.join("out");
+        let result = copy_groups(&[group], &[], &dest, Arc::new(NoopProgress)).unwrap();
+
+        assert_eq!(result.files_copied, 2, "both source files must be copied");
+        assert_eq!(result.files_skipped, 0, "neither file is a real duplicate");
+
+        let dest_dir = dest.join("2026/5. May/4th");
+        let mut names: Vec<String> = std::fs::read_dir(&dest_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["IMG.jpg", "IMG_1.jpg"]);
+    }
+
+    /// Re-running on the same source must remain idempotent: a file that
+    /// pre-existed at the destination with the same name and size is deduped.
+    #[test]
+    fn pre_existing_destination_file_is_deduped() {
+        let tmp = tempdir();
+        let src = tmp.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("IMG.jpg"), b"AAAAAAAA").unwrap();
+
+        let dest = tmp.join("out");
+        let dest_day = dest.join("2026/5. May/4th");
+        std::fs::create_dir_all(&dest_day).unwrap();
+        // Identical name + size already at the destination.
+        std::fs::write(dest_day.join("IMG.jpg"), b"AAAAAAAA").unwrap();
+
+        let group = DateGroup {
+            date_key: "2026-05-04".into(),
+            folder_path: PathBuf::from("2026/5. May/4th"),
+            display_name: "4th May 2026".into(),
+            date: Local::now(),
+            files: vec![synthetic_meta(src.join("IMG.jpg"), 8)],
+            image_count: 1,
+            video_count: 0,
+        };
+
+        let result = copy_groups(&[group], &[], &dest, Arc::new(NoopProgress)).unwrap();
+        assert_eq!(result.files_copied, 0);
+        assert_eq!(result.files_skipped, 1);
+    }
+
+    fn synthetic_meta(path: PathBuf, size: u64) -> MediaMeta {
+        let filename = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+        MediaMeta {
+            file: MediaFile {
+                path,
+                filename,
+                extension: ".jpg".into(),
+                media_type: MediaType::Image,
+                size,
+            },
+            created_date: Local::now(),
+            date_source: DateSource::FileMtime,
+        }
+    }
+
+    fn tempdir() -> PathBuf {
+        let mut p = std::env::temp_dir();
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        p.push(format!("gs-copier-test-{}", n));
+        std::fs::create_dir_all(&p).unwrap();
+        p
     }
 }

@@ -33,8 +33,15 @@ impl ScanProgress for NoopProgress {}
 
 /// Recursively walks `root` in parallel and returns every file whose extension
 /// matches one of the supported image/video formats.
+///
+/// `skip_root`, if provided, prunes any path under it from the walk — used to
+/// stop a re-run from re-scanning its own previously-produced output folder.
+///
+/// Symlinks pointing at regular files are treated as files (the previous
+/// behaviour silently dropped any symlinked media).
 pub fn scan_directory<P: AsRef<Path>>(
     root: P,
+    skip_root: Option<&Path>,
     progress: Arc<dyn ScanProgress>,
 ) -> Result<ScanResult> {
     let bytes = AtomicU64::new(0);
@@ -52,18 +59,42 @@ pub fn scan_directory<P: AsRef<Path>>(
             Ok(e) => e,
             Err(_) => continue,
         };
-        if !entry.file_type().is_file() {
-            if entry.file_type().is_dir() {
-                progress.on_dir();
+        let path = entry.path();
+
+        // Don't descend into the output folder if we're re-running on the same
+        // source directory — otherwise we'd treat already-sorted files as new
+        // input and waste a copy pass deduping every one of them.
+        if let Some(sr) = skip_root {
+            if path.starts_with(sr) {
+                continue;
             }
+        }
+
+        let file_type = entry.file_type();
+        if file_type.is_dir() {
+            progress.on_dir();
             continue;
         }
-        let path = entry.path();
+
+        // Symlinks to files are *not* `is_file()` with `follow_links(false)`;
+        // resolve them explicitly so libraries built with symlinks still
+        // sort. Broken symlinks fall through and get skipped quietly.
+        let is_real_file = file_type.is_file()
+            || (file_type.is_symlink()
+                && std::fs::metadata(&path)
+                    .map(|m| m.is_file())
+                    .unwrap_or(false));
+        if !is_real_file {
+            continue;
+        }
+
         let media_type = match classify(&path) {
             Some(t) => t,
             None => continue,
         };
-        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        // Use `std::fs::metadata` (follows symlinks) so symlinked files report
+        // their actual size, not the symlink's 96-byte placeholder.
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         bytes.fetch_add(size, Ordering::Relaxed);
         match media_type {
             MediaType::Image => {
@@ -118,10 +149,38 @@ mod tests {
         fs::create_dir_all(tmp.join("nested")).unwrap();
         fs::write(tmp.join("nested/c.mp4"), b"x").unwrap();
 
-        let r = scan_directory(&tmp, Arc::new(NoopProgress)).unwrap();
+        let r = scan_directory(&tmp, None, Arc::new(NoopProgress)).unwrap();
         assert_eq!(r.image_count, 2);
         assert_eq!(r.video_count, 1);
         assert!(r.directory_count >= 1);
+    }
+
+    #[test]
+    fn follows_symlinks_to_media_files() {
+        let tmp = tempdir();
+        fs::write(tmp.join("real.jpg"), b"hello").unwrap();
+        // Symlink with a media extension pointing at a real media file.
+        std::os::unix::fs::symlink(tmp.join("real.jpg"), tmp.join("link.jpg")).unwrap();
+
+        let r = scan_directory(&tmp, None, Arc::new(NoopProgress)).unwrap();
+        assert_eq!(r.image_count, 2, "symlinked media should be discovered");
+        // Reported size should be the real file's size, not the symlink's.
+        for f in &r.files {
+            assert_eq!(f.size, 5);
+        }
+    }
+
+    #[test]
+    fn skip_root_excludes_subtree() {
+        let tmp = tempdir();
+        fs::write(tmp.join("keep.jpg"), b"x").unwrap();
+        let skip = tmp.join("sorted by date");
+        fs::create_dir_all(skip.join("2026")).unwrap();
+        fs::write(skip.join("2026/old.jpg"), b"x").unwrap();
+
+        let r = scan_directory(&tmp, Some(&skip), Arc::new(NoopProgress)).unwrap();
+        assert_eq!(r.image_count, 1, "should not re-pick previously sorted files");
+        assert_eq!(r.files[0].filename, "keep.jpg");
     }
 
     fn tempdir() -> std::path::PathBuf {
