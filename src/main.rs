@@ -12,7 +12,7 @@ mod types;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use console::style;
+use console::{strip_ansi_codes, style};
 use indicatif::HumanBytes;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,7 +24,7 @@ use crate::grouper::group_by_date;
 use crate::metadata::extract_all;
 use crate::progress::{format_dur, Ui, UiOptions};
 use crate::scanner::scan_directory;
-use crate::types::{DateGroup, SkipKind, SkippedFile};
+use crate::types::{DateGroup, MediaType, SkipKind, SkippedFile};
 
 const OUTPUT_FOLDER_NAME: &str = "sorted by date";
 
@@ -171,24 +171,40 @@ fn run() -> Result<()> {
 
     // ─── Summary card ──────────────────────────────────────────────────────
     let total_elapsed = total_start.elapsed();
+    let copy_failed_count = copy_result
+        .skipped
+        .iter()
+        .filter(|s| s.kind == SkipKind::CopyFailed)
+        .count();
+    let copy_failed_images = copy_result
+        .skipped
+        .iter()
+        .filter(|s| s.kind == SkipKind::CopyFailed && s.media_type == MediaType::Image)
+        .count();
+    let copy_failed_videos = copy_result
+        .skipped
+        .iter()
+        .filter(|s| s.kind == SkipKind::CopyFailed && s.media_type == MediaType::Video)
+        .count();
+
     print_summary_card(
         &ui,
         SummaryInputs {
             output: &output,
             total_elapsed,
             total_files,
-            image_count: group_result.total_images,
-            video_count: group_result.total_videos,
+            input_images: scan.image_count,
+            input_videos: scan.video_count,
+            input_bytes: scan.total_bytes,
+            scanned_dirs: scan.directory_count,
             folders_created: copy_result.folders_created,
             files_copied: copy_result.files_copied,
             files_skipped: copy_result.files_skipped,
             bytes_copied: copy_result.bytes_copied,
             unsortable_copied: copy_result.unsortable_copied,
-            copy_failed: copy_result
-                .skipped
-                .iter()
-                .filter(|s| s.kind == SkipKind::CopyFailed)
-                .count(),
+            copy_failed: copy_failed_count,
+            copy_failed_images,
+            copy_failed_videos,
             sources: date_sources_snapshot,
             span: oldest_to_newest(&group_result.groups),
         },
@@ -214,39 +230,33 @@ fn print_skipped_report(ui: &Ui, skipped: &[SkippedFile]) {
         .count();
 
     println!();
+    print_section_header(g.pick("⚠️", "[!]"), "SKIPPED FROM SORTING");
+    println!();
     println!(
-        "{}  {}  {} skipped from sorting",
-        style("▸").yellow().bold(),
-        g.pick("⚠️", "[!]"),
-        style(skipped.len()).bold().yellow()
+        "    {} files were not placed into a date folder ({} unsortable · {} copy errors)",
+        style(skipped.len()).bold().yellow(),
+        style(unsortable_total).bold(),
+        style(failed_total).bold().red(),
     );
-    if unsortable_total > 0 {
-        println!(
-            "  {} {} unsortable (copied to {}/)",
-            style("·").dim(),
-            style(unsortable_total).bold(),
-            style(copier::UNSORTABLE_FOLDER).yellow()
-        );
-    }
-    if failed_total > 0 {
-        println!(
-            "  {} {} copy failure(s)",
-            style("·").dim(),
-            style(failed_total).bold().red()
-        );
-    }
+    println!();
 
     for entry in skipped.iter().take(MAX_PRINTED) {
-        let tag = match entry.kind {
-            SkipKind::Unsortable => style(format!("[{}]", entry.kind.label())).yellow(),
-            SkipKind::CopyFailed => style(format!("[{}]", entry.kind.label())).red(),
+        let tag_styled = match entry.kind {
+            SkipKind::Unsortable => style(format!(" {:^12} ", "unsortable"))
+                .black()
+                .on_yellow()
+                .to_string(),
+            SkipKind::CopyFailed => style(format!(" {:^12} ", "copy failed"))
+                .white()
+                .on_red()
+                .to_string(),
         };
         println!(
-            "    {} {} — {}",
-            tag,
+            "    {}  {}",
+            tag_styled,
             style(entry.path.display()).bold(),
-            style(&entry.reason).dim()
         );
+        println!("    {}    {}", " ".repeat(14), style(&entry.reason).dim());
     }
     if skipped.len() > MAX_PRINTED {
         println!(
@@ -255,7 +265,6 @@ fn print_skipped_report(ui: &Ui, skipped: &[SkippedFile]) {
             skipped.len() - MAX_PRINTED
         );
     }
-    println!();
 }
 
 fn print_group_overview(ui: &Ui, groups: &[DateGroup]) {
@@ -299,114 +308,421 @@ struct SummaryInputs<'a> {
     output: &'a Path,
     total_elapsed: std::time::Duration,
     total_files: u64,
-    image_count: usize,
-    video_count: usize,
+
+    // ── Input (from scanner) ──
+    input_images: usize,
+    input_videos: usize,
+    input_bytes: u64,
+    scanned_dirs: usize,
+
+    // ── Copy results ──
     folders_created: usize,
     files_copied: usize,
-    files_skipped: usize,
+    files_skipped: usize, // dedup
     bytes_copied: u64,
     unsortable_copied: usize,
     copy_failed: usize,
+    copy_failed_images: usize,
+    copy_failed_videos: usize,
+
     sources: progress::MetaSnapshot,
     span: Option<(chrono::DateTime<chrono::Local>, chrono::DateTime<chrono::Local>)>,
 }
 
+const CARD_WIDTH: usize = 67;
+
 fn print_summary_card(ui: &Ui, s: SummaryInputs<'_>) {
     let g = ui.glyphs;
-    let bar = "═".repeat(63);
 
     let secs = s.total_elapsed.as_secs_f64().max(0.001);
     let files_per_sec = (s.total_files as f64 / secs) as u64;
     let avg_bytes_per_sec = (s.bytes_copied as f64 / secs) as u64;
 
-    println!("{}", style(&bar).green());
-    println!(
-        "  {}  All done in {}   {} {} files/s {}",
-        g.pick("✨", "*"),
-        style(format_dur(s.total_elapsed)).bold().green(),
-        style("(").dim(),
-        style(files_per_sec).bold(),
-        style(")").dim()
-    );
-    println!("{}", style(&bar).green());
+    let input_total = s.input_images + s.input_videos;
+    // A file is "in the output" if we successfully placed it somewhere
+    // (date folder OR unsortable bin), or if it was already there from a
+    // prior run (deduped). The only files NOT in the output are the ones
+    // whose copy outright failed.
+    let output_images = s.input_images.saturating_sub(s.copy_failed_images);
+    let output_videos = s.input_videos.saturating_sub(s.copy_failed_videos);
+    let output_total = output_images + output_videos;
+    let lost_total = s.copy_failed;
+    let everything_ok = lost_total == 0;
 
-    println!(
-        "  {} Images       : {}",
+    let title = format!(
+        "{}  Sorted in {}   ·   {} files/s",
+        if everything_ok {
+            g.pick("✨", "*")
+        } else {
+            g.pick("⚠️", "!")
+        },
+        format_dur(s.total_elapsed),
+        files_per_sec
+    );
+
+    println!();
+    print_solid_bar(everything_ok);
+    print_centred(&title, everything_ok);
+    print_solid_bar(everything_ok);
+    println!();
+
+    // ── Input vs Output table — the headline answer to "did everything sort?"
+    print_section_header(g.pick("📊", "[stats]"), "INPUT  →  OUTPUT");
+    println!();
+    print_table_header();
+    print_table_row(
         g.pick("🖼", "[img]"),
-        style(s.image_count).bold()
+        "Images",
+        s.input_images,
+        output_images,
     );
-    println!(
-        "  {} Videos       : {}",
+    print_table_row(
         g.pick("🎬", "[vid]"),
-        style(s.video_count).bold()
+        "Videos",
+        s.input_videos,
+        output_videos,
     );
-    println!(
-        "  {} Folders      : {} created",
-        g.pick("📁", "[dir]"),
-        style(s.folders_created).bold()
+    print_table_divider();
+    print_table_total(input_total, output_total, everything_ok);
+    println!();
+    print_verdict(input_total, output_total, lost_total, g);
+    println!();
+
+    // ── Output breakdown ─────────────────────────────────────────────────
+    print_section_header(g.pick("📤", "[out]"), "OUTPUT BREAKDOWN");
+    println!();
+    print_kv(
+        g.pick("✅", "[ok]"),
+        "Copied into date folders",
+        &style(s.files_copied).bold().green().to_string(),
     );
-    println!(
-        "  {} Copied       : {}",
-        g.pick("✅", "[ok ]"),
-        style(s.files_copied).bold().green()
+    print_kv(
+        g.pick("🔁", "[dup]"),
+        "Deduplicated (already in destination)",
+        &dim_zero_or_yellow(s.files_skipped),
     );
-    if s.files_skipped > 0 {
-        println!(
-            "  {} Deduplicated : {}",
-            g.pick("♻️", "[dup]"),
-            style(s.files_skipped).bold().yellow()
-        );
-    }
-    if s.unsortable_copied > 0 {
-        println!(
-            "  {} Unsortable   : {}  (copied to {}/)",
-            g.pick("❓", "[?]"),
-            style(s.unsortable_copied).bold().yellow(),
-            style(copier::UNSORTABLE_FOLDER).yellow()
-        );
-    }
+    print_kv(
+        g.pick("❓", "[uns]"),
+        &format!("Copied into {}/", copier::UNSORTABLE_FOLDER),
+        &dim_zero_or_yellow(s.unsortable_copied),
+    );
+    print_kv(
+        g.pick("🚧", "[skp]"),
+        "Skipped from sorting",
+        &dim_zero_or_yellow(s.copy_failed + s.unsortable_copied),
+    );
     if s.copy_failed > 0 {
-        println!(
-            "  {} Copy failed  : {}",
-            g.pick("⛔", "[X]"),
-            style(s.copy_failed).bold().red()
+        print_kv(
+            g.pick("⛔", "[err]"),
+            "Copy failures",
+            &style(s.copy_failed).bold().red().to_string(),
         );
     }
-    println!(
-        "  {} Total moved  : {}  ·  avg {}/s",
+    println!();
+    print_kv(
+        g.pick("📁", "[dir]"),
+        "New folders created",
+        &style(s.folders_created).bold().to_string(),
+    );
+    print_kv(
         g.pick("💾", "[siz]"),
-        HumanBytes(s.bytes_copied),
-        HumanBytes(avg_bytes_per_sec)
+        "Total bytes moved",
+        &format!(
+            "{}   {}   avg {}/s",
+            style(HumanBytes(s.bytes_copied)).bold(),
+            style("·").dim(),
+            style(HumanBytes(avg_bytes_per_sec)).cyan()
+        ),
     );
 
-    let total_src = s.sources.exif + s.sources.qt + s.sources.mp4 + s.sources.ffprobe + s.sources.fs;
+    // ── Date source attribution ──────────────────────────────────────────
+    let total_src =
+        s.sources.exif + s.sources.qt + s.sources.mp4 + s.sources.ffprobe + s.sources.fs;
     if total_src > 0 {
-        println!(
-            "  {} Date sources : EXIF {} · QuickTime {} · MP4box {} · ffprobe {} · fs {}",
-            g.pick("📅", "[src]"),
-            s.sources.exif,
-            s.sources.qt,
-            s.sources.mp4,
-            s.sources.ffprobe,
-            s.sources.fs
+        println!();
+        print_section_header(g.pick("📅", "[date]"), "DATE SOURCES");
+        println!();
+        print_kv(
+            g.pick("📷", "[exf]"),
+            "EXIF (image metadata)",
+            &num_or_dim(s.sources.exif),
+        );
+        print_kv(
+            g.pick("🍎", "[qt ]"),
+            "QuickTime (mov / m4v)",
+            &num_or_dim(s.sources.qt),
+        );
+        print_kv(
+            g.pick("📦", "[mp4]"),
+            "MP4box (mp4 / 3gp)",
+            &num_or_dim(s.sources.mp4),
+        );
+        print_kv(
+            g.pick("🎞", "[ff ]"),
+            "ffprobe (avi / mkv / wmv / ...)",
+            &num_or_dim(s.sources.ffprobe),
+        );
+        print_kv(
+            g.pick("💿", "[fs ]"),
+            "Filesystem timestamps",
+            &num_or_dim(s.sources.fs),
         );
     }
 
+    // ── Run details ──────────────────────────────────────────────────────
+    println!();
+    print_section_header(g.pick("📂", "[run]"), "RUN DETAILS");
+    println!();
     if let Some((oldest, newest)) = s.span {
-        println!(
-            "  {} Span         : {} → {}",
-            g.pick("🗓", "[spn]"),
-            date_format::format_for_display(&oldest),
-            date_format::format_for_display(&newest)
+        print_kv(
+            g.pick("📆", "[spn]"),
+            "Date span",
+            &format!(
+                "{}   →   {}",
+                style(date_format::format_for_display(&oldest)).cyan(),
+                style(date_format::format_for_display(&newest)).cyan()
+            ),
         );
     }
-
-    println!(
-        "  {} Output       : {}",
-        g.pick("📂", "[out]"),
-        style(s.output.display()).cyan()
+    print_kv(
+        g.pick("📥", "[in ]"),
+        "Source folders scanned",
+        &format!(
+            "{}   ({})",
+            style(s.scanned_dirs).bold(),
+            HumanBytes(s.input_bytes)
+        ),
     );
-    println!("{}", style(&bar).green());
+    print_kv(
+        g.pick("📤", "[out]"),
+        "Output location",
+        &style(s.output.display()).cyan().to_string(),
+    );
+
+    println!();
+    print_solid_bar(everything_ok);
+    println!();
+}
+
+// ─── Layout primitives ──────────────────────────────────────────────────────
+
+fn print_solid_bar(ok: bool) {
+    let line: String = std::iter::repeat('═').take(CARD_WIDTH).collect();
+    let coloured = if ok {
+        style(line).green()
+    } else {
+        style(line).yellow()
+    };
+    println!("{}", coloured);
+}
+
+fn print_centred(text: &str, ok: bool) {
+    let w = visible_len(text);
+    let pad = CARD_WIDTH.saturating_sub(w) / 2;
+    let line = format!("{}{}", " ".repeat(pad), text);
+    let styled = if ok {
+        style(line).bold().green()
+    } else {
+        style(line).bold().yellow()
+    };
+    println!("{}", styled);
+}
+
+/// Section header: a bold/cyan label preceded by an emoji and followed by
+/// trailing dashes that extend to the card edge, so each section is visually
+/// framed identically to its neighbours.
+fn print_section_header(emoji: &str, label: &str) {
+    // Layout: "  <emoji>  <label>  <dashes>" — total visible width = CARD_WIDTH.
+    let prefix_visible = 2 + visible_len(emoji) + 2 + visible_len(label) + 2;
+    let dashes_needed = CARD_WIDTH.saturating_sub(prefix_visible).max(3);
+    let dashes = "─".repeat(dashes_needed);
+    println!(
+        "  {}  {}  {}",
+        emoji,
+        style(label).bold().cyan(),
+        style(dashes).dim()
+    );
+}
+
+// ── Input/Output table ─────────────────────────────────────────────────────
+
+const TABLE_INDENT: &str = "    ";
+const COL_LABEL: usize = 22;
+const COL_NUM: usize = 14;
+
+fn print_table_header() {
+    println!(
+        "{}{}{}{}",
+        TABLE_INDENT,
+        " ".repeat(COL_LABEL),
+        right_align(&style("Input").bold().dim().to_string(), COL_NUM),
+        right_align(&style("Output").bold().dim().to_string(), COL_NUM),
+    );
+}
+
+fn print_table_row(emoji: &str, label: &str, input: usize, output: usize) {
+    let label_text = format!("{}  {}", emoji, label);
+    let label_pad = COL_LABEL.saturating_sub(visible_len(&label_text));
+    let in_cell = right_align(&format!("{}", input), COL_NUM);
+    let out_cell = right_align(&cmp_text(output, input), COL_NUM);
+    println!(
+        "{}{}{}{}{}",
+        TABLE_INDENT,
+        label_text,
+        " ".repeat(label_pad),
+        in_cell,
+        out_cell,
+    );
+}
+
+fn print_table_divider() {
+    let total_w = COL_LABEL + COL_NUM + COL_NUM;
+    println!("{}{}", TABLE_INDENT, style("─".repeat(total_w)).dim());
+}
+
+fn print_table_total(input: usize, output: usize, ok: bool) {
+    let label_text = "Total media";
+    let label_pad = COL_LABEL.saturating_sub(visible_len(label_text));
+    let in_cell = right_align(&style(input).bold().to_string(), COL_NUM);
+    let out_styled = if ok {
+        style(output).bold().green().to_string()
+    } else {
+        style(output).bold().yellow().to_string()
+    };
+    let out_cell = right_align(&out_styled, COL_NUM);
+    println!(
+        "{}{}{}{}{}",
+        TABLE_INDENT,
+        style(label_text).bold(),
+        " ".repeat(label_pad),
+        in_cell,
+        out_cell,
+    );
+}
+
+fn print_verdict(input: usize, output: usize, lost: usize, g: progress::Glyphs) {
+    let in_word = if input == 1 { "file" } else { "files" };
+    let out_word = if output == 1 { "file" } else { "files" };
+    if lost == 0 {
+        let line = format!(
+            "  {}   {}   →   {}   {}",
+            style(g.pick("✓", "[OK]")).bold().green(),
+            style(format!("{} {} in", input, in_word)).bold(),
+            style(format!("{} {} in output", output, out_word))
+                .bold()
+                .green(),
+            style("(none lost)").dim(),
+        );
+        println!("{}", line);
+    } else {
+        let lost_word = if lost == 1 { "file" } else { "files" };
+        let line = format!(
+            "  {}   {} {} in   →   {} placed   ·   {}",
+            style(g.pick("✗", "[!!]")).bold().red(),
+            style(input).bold(),
+            in_word,
+            style(output).bold().yellow(),
+            style(format!(
+                "{} {} LOST — see skipped report above",
+                lost, lost_word
+            ))
+            .bold()
+            .red(),
+        );
+        println!("{}", line);
+    }
+}
+
+// ── Key/Value rows with dot-leader alignment ───────────────────────────────
+
+const KV_INDENT: &str = "    ";
+const KV_LABEL_WIDTH: usize = 44;
+
+fn print_kv(emoji: &str, label: &str, value: &str) {
+    let prefix = format!("{}  {} ", emoji, label);
+    let prefix_visible = visible_len(&prefix);
+    // Dot leader fills the gap; minimum 2 dots so even the longest label is
+    // visually separated from the value.
+    let dots_needed = KV_LABEL_WIDTH
+        .saturating_sub(prefix_visible)
+        .saturating_sub(1)
+        .max(2);
+    let dots = ".".repeat(dots_needed);
+    println!(
+        "{}{}{} {}",
+        KV_INDENT,
+        prefix,
+        style(dots).dim(),
+        value,
+    );
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+fn right_align(s: &str, width: usize) -> String {
+    let visible = visible_len(s);
+    let pad = width.saturating_sub(visible);
+    format!("{}{}", " ".repeat(pad), s)
+}
+
+fn cmp_text(actual: usize, expected: usize) -> String {
+    if actual == expected {
+        style(actual).bold().green().to_string()
+    } else if actual < expected {
+        style(actual).bold().red().to_string()
+    } else {
+        style(actual).bold().to_string()
+    }
+}
+
+fn dim_zero_or_yellow(n: usize) -> String {
+    if n == 0 {
+        style(n).dim().to_string()
+    } else {
+        style(n).bold().yellow().to_string()
+    }
+}
+
+fn num_or_dim(n: u64) -> String {
+    if n == 0 {
+        style(n).dim().to_string()
+    } else {
+        style(n).bold().to_string()
+    }
+}
+
+/// Visible terminal-cell width of `s`, ignoring ANSI escape sequences. We
+/// deliberately roll our own (instead of `console::measure_text_width`) so
+/// every emoji is counted as 2 cells regardless of how the underlying
+/// unicode-width crate classifies it — terminals overwhelmingly render the
+/// emoji we use as 2 cells, and disagreement between metrics and renderer
+/// breaks column alignment in the summary table.
+fn visible_len(s: &str) -> usize {
+    let stripped = strip_ansi_codes(s);
+    let mut w = 0usize;
+    for c in stripped.chars() {
+        // Variation Selector-16 (U+FE0F) is invisible — don't count it.
+        if c == '\u{FE0F}' || c == '\u{200D}' {
+            continue;
+        }
+        if c.is_ascii() {
+            w += 1;
+        } else {
+            // Treat every non-ASCII (CJK, emoji, box-drawing >= U+1F000, etc.)
+            // as 2 cells. Box-drawing characters U+2500..U+257F are actually
+            // 1 cell, so override those.
+            let cp = c as u32;
+            if (0x2500..=0x257F).contains(&cp) || (0x2190..=0x21FF).contains(&cp) {
+                w += 1; // box drawing / arrows
+            } else if (0x0300..=0x036F).contains(&cp) {
+                // combining marks
+                continue;
+            } else {
+                w += 2;
+            }
+        }
+    }
+    w
 }
 
 fn oldest_to_newest(

@@ -184,12 +184,16 @@ mod tests {
     }
 
     fn tempdir() -> std::path::PathBuf {
-        let mut p = std::env::temp_dir();
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        p.push(format!("gs-test-{}", n));
+        let c = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let mut p = std::env::temp_dir();
+        p.push(format!("gs-scanner-test-{}-{}-{}", pid, c, n));
         std::fs::create_dir_all(&p).unwrap();
         p
     }

@@ -84,10 +84,10 @@ impl Ui {
 
     pub fn print_banner(&self, source: &Path, output: &Path, cores: usize) {
         let g = self.glyphs;
-        let bar = "═".repeat(63);
+        let bar = "═".repeat(67);
         println!("{}", style(&bar).cyan());
         println!(
-            "  {} {}  {}  {}  {} {} cores",
+            "  {}  {}   {}   {}   {}   {} cores",
             g.pick("📸", "[*]"),
             style("Gallery Sorter").bold().cyan(),
             style("·").dim(),
@@ -97,27 +97,29 @@ impl Ui {
         );
         println!("{}", style(&bar).cyan());
         println!(
-            "  {} Source : {}",
-            g.pick("📂", "[in] "),
-            style(source.display()).dim()
+            "  {}   {}   {}",
+            g.pick("📂", "[src]"),
+            style("Source:").dim(),
+            style(source.display()).cyan()
         );
         println!(
-            "  {} Output : {}",
+            "  {}   {}   {}",
             g.pick("📦", "[out]"),
-            style(output.display()).dim()
+            style("Output:").dim(),
+            style(output.display()).cyan()
         );
         println!();
     }
 
     pub fn phase_header(&self, idx: usize, total: usize, label: &str, emoji: &'static str) {
         let g = self.glyphs;
+        println!();
         println!(
-            "{}  Phase {}/{}  {}  {}",
-            style("▸").cyan().bold(),
-            idx,
-            total,
+            "  {}  {}  {}  {}",
+            style(format!("[{}/{}]", idx, total)).cyan().bold(),
             g.pick(emoji, "*"),
-            style(label).bold()
+            style(label).bold(),
+            style("───────────────────────────────────────────").dim(),
         );
     }
 

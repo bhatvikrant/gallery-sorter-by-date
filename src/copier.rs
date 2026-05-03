@@ -125,6 +125,7 @@ pub fn copy_groups(
                     path: meta.file.path.clone(),
                     reason: format!("copy failed: {e}"),
                     kind: SkipKind::CopyFailed,
+                    media_type: meta.file.media_type,
                 });
             }
         }
@@ -150,6 +151,7 @@ pub fn copy_groups(
                         path: u.file.path.clone(),
                         reason: u.reason.clone(),
                         kind: SkipKind::Unsortable,
+                        media_type: u.file.media_type,
                     });
                 }
                 Ok(Outcome::Deduped) => {
@@ -158,6 +160,7 @@ pub fn copy_groups(
                         path: u.file.path.clone(),
                         reason: format!("{} (already present in unsortable/)", u.reason),
                         kind: SkipKind::Unsortable,
+                        media_type: u.file.media_type,
                     });
                 }
                 Err(e) => {
@@ -168,6 +171,7 @@ pub fn copy_groups(
                             u.reason
                         ),
                         kind: SkipKind::CopyFailed,
+                        media_type: u.file.media_type,
                     });
                 }
             }
@@ -436,12 +440,19 @@ mod tests {
     }
 
     fn tempdir() -> PathBuf {
-        let mut p = std::env::temp_dir();
+        // Process id + atomic counter + nanos guarantees each test gets a
+        // distinct directory even when several tests run in parallel and hit
+        // the same wall-clock nanosecond.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let n = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        p.push(format!("gs-copier-test-{}", n));
+        let c = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let mut p = std::env::temp_dir();
+        p.push(format!("gs-copier-test-{}-{}-{}", pid, c, n));
         std::fs::create_dir_all(&p).unwrap();
         p
     }

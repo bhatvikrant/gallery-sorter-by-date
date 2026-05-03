@@ -7,7 +7,9 @@ use std::collections::HashMap;
 
 pub struct GroupResult {
     pub groups: Vec<DateGroup>,
+    #[allow(dead_code)]
     pub total_images: usize,
+    #[allow(dead_code)]
     pub total_videos: usize,
 }
 

@@ -78,6 +78,7 @@ pub struct SkippedFile {
     pub path: PathBuf,
     pub reason: String,
     pub kind: SkipKind,
+    pub media_type: MediaType,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +90,7 @@ pub enum SkipKind {
 }
 
 impl SkipKind {
+    #[allow(dead_code)]
     pub fn label(self) -> &'static str {
         match self {
             SkipKind::Unsortable => "unsortable",
