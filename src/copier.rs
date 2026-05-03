@@ -7,19 +7,30 @@
 //! collision check + reservation is atomic) while different directories run in
 //! full parallel across the rayon pool.
 
-use crate::types::{DateGroup, MediaMeta};
+use crate::types::{DateGroup, MediaMeta, SkipKind, SkippedFile, UnsortableMedia};
 use anyhow::Result;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+/// Sub-folder name (under the main `sorted by date/` output) that receives
+/// any media we couldn't determine a capture date for.
+pub const UNSORTABLE_FOLDER: &str = "unsortable";
+
 #[derive(Debug, Default)]
 pub struct CopyResult {
     pub folders_created: usize,
     pub files_copied: usize,
+    /// Files we didn't copy because an identical-name, identical-size file
+    /// was already at the destination (idempotent re-runs).
     pub files_skipped: usize,
     pub bytes_copied: u64,
+    /// Number of unsortable files copied into the `unsortable/` folder.
+    pub unsortable_copied: usize,
+    /// Per-file records explaining anything that wasn't placed into a normal
+    /// date folder (unsortable, or copy failures).
+    pub skipped: Vec<SkippedFile>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -44,6 +55,7 @@ struct DirState {
 
 pub fn copy_groups(
     groups: &[DateGroup],
+    unsortable: &[UnsortableMedia],
     dest_base: &Path,
     progress: Arc<dyn CopyProgress>,
 ) -> Result<CopyResult> {
@@ -58,18 +70,19 @@ pub fn copy_groups(
         if was_created {
             folders_created += 1;
         }
-        // Seed taken-name set with whatever's already on disk so duplicate
-        // filenames from prior runs are honoured.
-        let mut taken: HashSet<String> = HashSet::new();
-        if let Ok(rd) = std::fs::read_dir(&dest_dir) {
-            for entry in rd.flatten() {
-                if let Some(name) = entry.file_name().to_str() {
-                    taken.insert(name.to_string());
-                }
-            }
-        }
-        dir_states.insert(dest_dir, Arc::new(Mutex::new(DirState { taken })));
+        dir_states.insert(dest_dir.clone(), seed_dir_state(&dest_dir));
     }
+
+    // Reserve the unsortable bin too, if needed.
+    let unsortable_dir = dest_base.join(UNSORTABLE_FOLDER);
+    let unsortable_state = if !unsortable.is_empty() {
+        if ensure_dir(&unsortable_dir)? {
+            folders_created += 1;
+        }
+        Some(seed_dir_state(&unsortable_dir))
+    } else {
+        None
+    };
 
     // Phase B: parallel copy. Flatten (group, file) pairs so rayon can spread
     // work across the whole input rather than one group at a time.
@@ -81,6 +94,8 @@ pub fn copy_groups(
     let copied = std::sync::atomic::AtomicU64::new(0);
     let skipped = std::sync::atomic::AtomicU64::new(0);
     let bytes = std::sync::atomic::AtomicU64::new(0);
+    let unsortable_copied = std::sync::atomic::AtomicU64::new(0);
+    let skip_records: Mutex<Vec<SkippedFile>> = Mutex::new(Vec::new());
 
     work.par_iter().for_each(|(g, meta)| {
         let dest_dir = dest_base.join(&g.folder_path);
@@ -90,31 +105,89 @@ pub fn copy_groups(
             .clone();
 
         match copy_one(meta, &dest_dir, &state, &progress) {
-            Ok(outcome) => match outcome {
-                Outcome::Copied(n) => {
-                    copied.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    bytes.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
-                }
-                Outcome::Deduped => {
-                    skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                }
-            },
+            Ok(Outcome::Copied(n)) => {
+                copied.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                bytes.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+            }
+            Ok(Outcome::Deduped) => {
+                skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             Err(e) => {
-                // Don't abort the whole run for one bad file; log to stderr and continue.
-                eprintln!(
-                    "  [warn] failed to copy {}: {e}",
-                    meta.file.path.display()
-                );
+                skip_records.lock().expect("skip records").push(SkippedFile {
+                    path: meta.file.path.clone(),
+                    reason: format!("copy failed: {e}"),
+                    kind: SkipKind::CopyFailed,
+                });
             }
         }
     });
+
+    // Phase C: copy the unsortable bin (typically tiny, but fully parallel
+    // anyway for consistency with the main copy).
+    if let Some(state) = &unsortable_state {
+        unsortable.par_iter().for_each(|u| {
+            // Reuse `copy_one`'s dedup + unique-naming logic by wrapping into
+            // a synthetic `MediaMeta`. The date isn't actually used by the
+            // copier — only the file/path/size are.
+            let synthetic = MediaMeta {
+                file: u.file.clone(),
+                created_date: chrono::Local::now(),
+                date_source: crate::types::DateSource::FileMtime,
+            };
+            match copy_one(&synthetic, &unsortable_dir, state, &progress) {
+                Ok(Outcome::Copied(n)) => {
+                    unsortable_copied.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    bytes.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+                    skip_records.lock().expect("skip records").push(SkippedFile {
+                        path: u.file.path.clone(),
+                        reason: u.reason.clone(),
+                        kind: SkipKind::Unsortable,
+                    });
+                }
+                Ok(Outcome::Deduped) => {
+                    skipped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    skip_records.lock().expect("skip records").push(SkippedFile {
+                        path: u.file.path.clone(),
+                        reason: format!("{} (already present in unsortable/)", u.reason),
+                        kind: SkipKind::Unsortable,
+                    });
+                }
+                Err(e) => {
+                    skip_records.lock().expect("skip records").push(SkippedFile {
+                        path: u.file.path.clone(),
+                        reason: format!(
+                            "{} — and copy into unsortable/ also failed: {e}",
+                            u.reason
+                        ),
+                        kind: SkipKind::CopyFailed,
+                    });
+                }
+            }
+        });
+    }
 
     Ok(CopyResult {
         folders_created,
         files_copied: copied.load(std::sync::atomic::Ordering::Relaxed) as usize,
         files_skipped: skipped.load(std::sync::atomic::Ordering::Relaxed) as usize,
         bytes_copied: bytes.load(std::sync::atomic::Ordering::Relaxed),
+        unsortable_copied: unsortable_copied.load(std::sync::atomic::Ordering::Relaxed) as usize,
+        skipped: skip_records.into_inner().expect("skip records"),
     })
+}
+
+fn seed_dir_state(dir: &Path) -> Arc<Mutex<DirState>> {
+    // Seed taken-name set with whatever's already on disk so duplicate
+    // filenames from prior runs are honoured.
+    let mut taken: HashSet<String> = HashSet::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for entry in rd.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                taken.insert(name.to_string());
+            }
+        }
+    }
+    Arc::new(Mutex::new(DirState { taken }))
 }
 
 enum Outcome {

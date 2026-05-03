@@ -9,7 +9,7 @@
 use crate::copier::{CopyEvent, CopyProgress};
 use crate::metadata::MetadataProgress;
 use crate::scanner::ScanProgress;
-use crate::types::{DateSource, MediaFile, MediaMeta, MediaType};
+use crate::types::{DateSource, MediaFile, MediaMeta, MediaType, UnsortableMedia};
 use console::{style, Term};
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use std::path::Path;
@@ -182,6 +182,7 @@ impl Ui {
             src_mp4: AtomicU64::new(0),
             src_ffprobe: AtomicU64::new(0),
             src_fs: AtomicU64::new(0),
+            unsortable: AtomicU64::new(0),
             quiet: self.opts.quiet,
             glyphs: self.glyphs,
         })
@@ -288,6 +289,7 @@ pub struct MetaBar {
     src_mp4: AtomicU64,
     src_ffprobe: AtomicU64,
     src_fs: AtomicU64,
+    unsortable: AtomicU64,
     quiet: bool,
     glyphs: Glyphs,
 }
@@ -399,6 +401,20 @@ impl MetadataProgress for MetaBar {
                 self.src_fs.fetch_add(1, Ordering::Relaxed);
             }
         }
+        self.pb.inc(1);
+        self.refresh();
+    }
+
+    fn on_unsortable(&self, file: &UnsortableMedia) {
+        match file.file.media_type {
+            MediaType::Image => {
+                self.images_done.fetch_add(1, Ordering::Relaxed);
+            }
+            MediaType::Video => {
+                self.videos_done.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        self.unsortable.fetch_add(1, Ordering::Relaxed);
         self.pb.inc(1);
         self.refresh();
     }

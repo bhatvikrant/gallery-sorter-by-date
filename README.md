@@ -75,6 +75,12 @@ For dates it tries (in order):
 - **MP4/MOV/M4V/3GP**: QuickTime `creationdate` → `mvhd` box → file birth time → file modify time
 - **Other videos**: `ffprobe` (if installed) → file birth time → file modify time
 
+If a file has none of the above (no metadata **and** no readable filesystem
+timestamps), it's treated as **unsortable**: the file is still copied — into
+a dedicated `unsortable/` folder next to the date tree — and the per-file
+reason is printed in the end-of-run report so you can decide what to do
+with each one.
+
 ---
 
 ## 🚀 Install — three steps
@@ -358,6 +364,9 @@ NO_EMOJI=1 gallery-sorter /path/to/your/photos
   contents, the second is renamed `name_1.ext`, `name_2.ext`, etc.
 - **Idempotent.** Running twice on the same folder is harmless — the second
   run just prints "deduplicated" for everything.
+- **Nothing left behind.** Files that have no usable date at all are still
+  copied into an `unsortable/` folder, and each one is listed (with its
+  reason) in the end-of-run report.
 
 ---
 

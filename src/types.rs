@@ -61,3 +61,38 @@ pub struct DateGroup {
     pub image_count: usize,
     pub video_count: usize,
 }
+
+/// A file we couldn't assign a real capture date to (no metadata, no usable
+/// filesystem timestamps). These get copied into the `unsortable/` folder
+/// instead of being slotted into a date bucket.
+#[derive(Debug, Clone)]
+pub struct UnsortableMedia {
+    pub file: MediaFile,
+    pub reason: String,
+}
+
+/// A file that wasn't placed into the normal Year/Month/Day tree, with the
+/// human-readable reason. Surfaced in the end-of-run summary.
+#[derive(Debug, Clone)]
+pub struct SkippedFile {
+    pub path: PathBuf,
+    pub reason: String,
+    pub kind: SkipKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipKind {
+    /// Date couldn't be determined; file was copied into `unsortable/`.
+    Unsortable,
+    /// Copy itself failed (permission denied, I/O error, etc.).
+    CopyFailed,
+}
+
+impl SkipKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            SkipKind::Unsortable => "unsortable",
+            SkipKind::CopyFailed => "copy failed",
+        }
+    }
+}

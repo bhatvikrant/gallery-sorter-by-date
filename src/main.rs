@@ -24,7 +24,7 @@ use crate::grouper::group_by_date;
 use crate::metadata::extract_all;
 use crate::progress::{format_dur, Ui, UiOptions};
 use crate::scanner::scan_directory;
-use crate::types::DateGroup;
+use crate::types::{DateGroup, SkipKind, SkippedFile};
 
 const OUTPUT_FOLDER_NAME: &str = "sorted by date";
 
@@ -127,10 +127,22 @@ fn run() -> Result<()> {
         scan.video_count as u64,
     );
     let meta_start = Instant::now();
-    let metas = extract_all(scan.files, meta_bar.clone() as Arc<dyn metadata::MetadataProgress>);
+    let extract = extract_all(scan.files, meta_bar.clone() as Arc<dyn metadata::MetadataProgress>);
     let meta_elapsed = meta_start.elapsed();
     let date_sources_snapshot = meta_bar.snapshot();
+    let unsortable = extract.unsortable;
+    let metas = extract.metas;
     meta_bar.finish(metas.len() as u64, meta_elapsed);
+
+    if !unsortable.is_empty() {
+        println!(
+            "  {} {} file(s) had no determinable date and will be copied to {}/",
+            style("note:").yellow().bold(),
+            style(unsortable.len()).bold(),
+            style(copier::UNSORTABLE_FOLDER).yellow()
+        );
+        println!();
+    }
 
     // Phase 3: group + copy ─────────────────────────────────────────────────
     ui.phase_header(3, 3, "Copying into date folders", "📤");
@@ -141,11 +153,17 @@ fn run() -> Result<()> {
     let copy_start = Instant::now();
     let copy_result = copy_groups(
         &group_result.groups,
+        &unsortable,
         &output,
         copy_bar.clone() as Arc<dyn copier::CopyProgress>,
     )?;
     let copy_elapsed = copy_start.elapsed();
     copy_bar.finish(copy_elapsed);
+
+    // ─── Skipped report ────────────────────────────────────────────────────
+    if !copy_result.skipped.is_empty() {
+        print_skipped_report(&ui, &copy_result.skipped);
+    }
 
     // ─── Summary card ──────────────────────────────────────────────────────
     let total_elapsed = total_start.elapsed();
@@ -161,12 +179,79 @@ fn run() -> Result<()> {
             files_copied: copy_result.files_copied,
             files_skipped: copy_result.files_skipped,
             bytes_copied: copy_result.bytes_copied,
+            unsortable_copied: copy_result.unsortable_copied,
+            copy_failed: copy_result
+                .skipped
+                .iter()
+                .filter(|s| s.kind == SkipKind::CopyFailed)
+                .count(),
             sources: date_sources_snapshot,
             span: oldest_to_newest(&group_result.groups),
         },
     );
 
     Ok(())
+}
+
+/// Prints a per-file breakdown of everything that didn't end up in a normal
+/// date folder, with the human-readable reason. Truncated to keep the
+/// terminal usable on huge libraries.
+fn print_skipped_report(ui: &Ui, skipped: &[SkippedFile]) {
+    let g = ui.glyphs;
+    const MAX_PRINTED: usize = 50;
+
+    let unsortable_total = skipped
+        .iter()
+        .filter(|s| s.kind == SkipKind::Unsortable)
+        .count();
+    let failed_total = skipped
+        .iter()
+        .filter(|s| s.kind == SkipKind::CopyFailed)
+        .count();
+
+    println!();
+    println!(
+        "{}  {}  {} skipped from sorting",
+        style("▸").yellow().bold(),
+        g.pick("⚠️", "[!]"),
+        style(skipped.len()).bold().yellow()
+    );
+    if unsortable_total > 0 {
+        println!(
+            "  {} {} unsortable (copied to {}/)",
+            style("·").dim(),
+            style(unsortable_total).bold(),
+            style(copier::UNSORTABLE_FOLDER).yellow()
+        );
+    }
+    if failed_total > 0 {
+        println!(
+            "  {} {} copy failure(s)",
+            style("·").dim(),
+            style(failed_total).bold().red()
+        );
+    }
+
+    for entry in skipped.iter().take(MAX_PRINTED) {
+        let tag = match entry.kind {
+            SkipKind::Unsortable => style(format!("[{}]", entry.kind.label())).yellow(),
+            SkipKind::CopyFailed => style(format!("[{}]", entry.kind.label())).red(),
+        };
+        println!(
+            "    {} {} — {}",
+            tag,
+            style(entry.path.display()).bold(),
+            style(&entry.reason).dim()
+        );
+    }
+    if skipped.len() > MAX_PRINTED {
+        println!(
+            "    {} {} more (full list omitted)",
+            style("…").dim(),
+            skipped.len() - MAX_PRINTED
+        );
+    }
+    println!();
 }
 
 fn print_group_overview(ui: &Ui, groups: &[DateGroup]) {
@@ -216,6 +301,8 @@ struct SummaryInputs<'a> {
     files_copied: usize,
     files_skipped: usize,
     bytes_copied: u64,
+    unsortable_copied: usize,
+    copy_failed: usize,
     sources: progress::MetaSnapshot,
     span: Option<(chrono::DateTime<chrono::Local>, chrono::DateTime<chrono::Local>)>,
 }
@@ -264,6 +351,21 @@ fn print_summary_card(ui: &Ui, s: SummaryInputs<'_>) {
             "  {} Deduplicated : {}",
             g.pick("♻️", "[dup]"),
             style(s.files_skipped).bold().yellow()
+        );
+    }
+    if s.unsortable_copied > 0 {
+        println!(
+            "  {} Unsortable   : {}  (copied to {}/)",
+            g.pick("❓", "[?]"),
+            style(s.unsortable_copied).bold().yellow(),
+            style(copier::UNSORTABLE_FOLDER).yellow()
+        );
+    }
+    if s.copy_failed > 0 {
+        println!(
+            "  {} Copy failed  : {}",
+            g.pick("⛔", "[X]"),
+            style(s.copy_failed).bold().red()
         );
     }
     println!(
