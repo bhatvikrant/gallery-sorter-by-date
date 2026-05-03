@@ -92,8 +92,23 @@ command.
 <summary><b>🍎 macOS / 🐧 Linux</b></summary>
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
 source "$HOME/.cargo/env"
+```
+
+`--no-modify-path` keeps rustup from trying to edit your shell profile
+(which can fail noisily on some setups, e.g. a `~/.bashrc` owned by root).
+The `source` line on the next line is all the current shell needs.
+
+To make `cargo` available in **future** terminal sessions too, append the
+env line to your shell's startup file — once, ever:
+
+```bash
+# zsh (default on modern macOS)
+echo '. "$HOME/.cargo/env"' >> ~/.zshrc
+
+# bash
+echo '. "$HOME/.cargo/env"' >> ~/.bashrc
 ```
 
 </details>
@@ -240,10 +255,18 @@ cargo uninstall gallery-sorter
 <summary><b><code>cargo: command not found</code></b></summary>
 
 Rust either isn't installed or its `bin` directory isn't on your `PATH` yet.
-Re-open your terminal, or run:
+
+For the **current** shell:
 
 ```bash
 source "$HOME/.cargo/env"           # macOS / Linux
+```
+
+For **future** shells, append the env line to your shell's startup file once:
+
+```bash
+echo '. "$HOME/.cargo/env"' >> ~/.zshrc    # zsh
+echo '. "$HOME/.cargo/env"' >> ~/.bashrc   # bash
 ```
 
 On Windows, just close and reopen the terminal after running `winget install
